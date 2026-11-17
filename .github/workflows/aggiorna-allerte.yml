@@ -1,0 +1,38 @@
+name: Aggiorna allerte
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aggiorna-allerte
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scarica l'ultimo bollettino
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/update_alerts.py
+
+      - name: Pubblica se cambiato
+        run: |
+          git add allerte.json
+          if git diff --cached --quiet; then
+            echo "Nessuna modifica"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          ID=$(python3 -c 'import json;print(json.load(open("allerte.json"))["bulletin_id"])')
+          git commit -m "Bollettino $ID"
+          git push
