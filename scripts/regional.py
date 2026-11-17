@@ -159,7 +159,11 @@ def parse_lombardia_hours(body):
         data = json.loads(body)
         items = data if isinstance(data, list) else data.get("item") or data.get("list") or []
         for item in items:
-            rows.append((item["nomezonaomogenea"], int(item["dtprevisione"]), int(item.get("cdlivello") or 0)))
+            flat = {k.lower().replace("_", ""): v for k, v in item.items()}
+            try:
+                rows.append((flat["nomezonaomogenea"], int(flat["dtprevisione"]), int(flat.get("cdlivello") or 0)))
+            except KeyError as e:
+                raise KeyError(f"{e} - campi ricevuti: {sorted(item)[:12]}") from None
     return rows
 
 
