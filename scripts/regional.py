@@ -511,7 +511,8 @@ def veneto():
 
 ALLERTAMETEO_PHENOMENA = {
     "vento": "vento", "neve": "neve", "mareggiate": "mareggiate", "ghiaccio": "ghiaccio",
-    "pioggia-che-gela": "pioggia che gela", "temperature-estreme": "temperature elevate",
+    "pioggia-che-gela": "pioggia che gela", "ghiaccio-pioggia-gela": "ghiaccio e pioggia che gela",
+    "stato-mare": "stato del mare", "temperature-estreme": "temperature estreme",
     "temperature-estreme-basse": "temperature basse",
 }
 
@@ -534,20 +535,24 @@ def parse_allertameteo(body, day, zone_of_area):
 
 
 def allertameteo(base, zone_of_area, region_label):
-    today = datetime.now(ROME).date()
-    entries = []
-    for suffix, offset in (("", 0), ("-domani", 1)):
-        body = get(f"{base}/o/api/allerta/get-stato-allerta{suffix}", headers={"Accept": "application/json"})
-        entries += parse_allertameteo(body, today + timedelta(days=offset), zone_of_area)
-    title = region_label
+    titles = {}
     try:
         feed = get(f"{base}/compila-allerta-portlet/feed?feed=allerte-bollettini")
-        first = re.search(r"<entry>\s*<title>([^<]+)</title>", feed)
-        if first:
-            title = f"{region_label} - {first.group(1).strip()}"
+        for t in re.findall(r"<entry>\s*<title>([^<]+)</title>", feed):
+            m = re.search(r"del (\d{2})[-/](\d{2})[-/](\d{4})", t)
+            if m:
+                titles.setdefault(date(int(m.group(3)), int(m.group(2)), int(m.group(1))), t.strip())
     except Exception:  # noqa: BLE001  il titolo e' facoltativo
         pass
-    return grouped(entries, title=title, url=f"{base}/allerte-e-bollettini")
+    today = datetime.now(ROME).date()
+    alerts = []
+    for suffix, offset in (("", 0), ("-domani", 1)):
+        day = today + timedelta(days=offset)
+        body = get(f"{base}/o/api/allerta/get-stato-allerta{suffix}", headers={"Accept": "application/json"})
+        title = f"{region_label} - {titles[day]}" if day in titles else region_label
+        alerts += grouped(parse_allertameteo(body, day, zone_of_area), title=title,
+                          url=f"{base}/allerte-e-bollettini")
+    return alerts
 
 
 @adapter("Marche")
@@ -555,3 +560,21 @@ def marche():
     return allertameteo("https://allertameteo.regione.marche.it",
                         lambda a: f"Marc-{a}" if a in {"1", "2", "3", "4", "5", "6"} else None,
                         "Regione Marche")
+
+
+# Emilia-Romagna: stessa piattaforma. Licenza dei servizi web CC BY-NC-SA 4.0
+# (attribuzione "Allerta Meteo Emilia-Romagna", uso non commerciale).
+EMILIA_ZONES = {
+    "A1": "Montagna romagnola", "A2": "Alta collina romagnola", "B1": "Bassa collina e pianura romagnola",
+    "B2": "Costa romagnola", "C1": "Montagna bolognese", "C2": "Collina bolognese", "D1": "Pianura bolognese",
+    "D2": "Costa ferrarese", "D3": "Pianura ferrarese", "E1": "Montagna emiliana centrale",
+    "E2": "Collina emiliana centrale", "F1": "Pianura modenese", "F2": "Pianura reggiana",
+    "F3": "Pianura reggiana di Po", "G1": "Montagna piacentino-parmense", "G2": "Alta collina piacentino-parmense",
+    "H1": "Bassa collina piacentino-parmense", "H2": "Pianura piacentino-parmense",
+}
+
+
+@adapter("Emilia-Romagna")
+def emilia_romagna():
+    return allertameteo("https://allertameteo.regione.emilia-romagna.it", EMILIA_ZONES.get,
+                        "Allerta Meteo Emilia-Romagna")
