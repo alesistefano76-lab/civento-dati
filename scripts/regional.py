@@ -67,9 +67,9 @@ def _open(req, timeout):
         return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXTS[host])
 
 
-def get(url, headers=None, data=None):
+def get(url, headers=None, data=None, timeout=45):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, **(headers or {})})
-    with _open(req, 45) as r:
+    with _open(req, timeout) as r:
         raw = r.read()
         charset = r.headers.get_content_charset() or "utf-8"
     return raw.decode(charset, errors="replace")
@@ -686,7 +686,7 @@ def parse_puglia(text):
 
 @adapter("Puglia")
 def puglia():
-    listing = get(PUGLIA_LIST)
+    listing = get(PUGLIA_LIST, timeout=120)
     links = re.findall(r'href="(https://protezionecivile\.regione\.puglia\.it/documents/[^"]+\.pdf[^"]*)"\s*'
                        r'[^>]*>\s*([^<]+?)\s*</a>', listing)
     if not links:
@@ -706,3 +706,63 @@ def puglia():
         day_entries = [{k: v for k, v in e.items() if k != "_day"} for e in entries if e["_day"] == day]
         alerts += grouped(day_entries, title=f"Regione Puglia - {label}", url=url.replace("&amp;", "&"))
     return alerts
+
+
+# ── Lazio ────────────────────────────────────────────────────────────────────
+# Il banner presente in ogni pagina di regione.lazio.it indica l'allertamento in corso e il PDF.
+# Il PDF (testo libero) contiene "ALLERTA PER VENTO ALLERTA GIALLA su tutte le Zone di Allerta" e la
+# validita' descrittiva ("dalla mattina di domani, martedi 17.11.2026, e per le successive 24-36 ore").
+
+LAZIO_ZONES = dict(zip("ABCDEFG", [
+    "Bacini Costieri Nord", "Bacino Medio Tevere", "Appennino di Rieti", "Bacini di Roma", "Aniene",
+    "Bacini Costieri Sud", "Bacino del Liri",
+]))
+LAZIO_PHENOMENA = {"VENTO": "vento", "NEVE": "neve", "GHIACCIO": "ghiaccio", "MAREGGIATE": "mareggiate",
+                   "TEMPERATURE": "temperature"}
+DAY_PART_HOUR = {"notte": 0, "mattina": 6, "mattinata": 6, "pomeriggio": 12, "sera": 18, "serata": 18}
+
+
+def parse_lazio_pdf(text, issued):
+    flat = re.sub(r"\s+", " ", text)
+    start_hour, start_day = 0, issued + timedelta(days=1)
+    m = re.search(r"dall[a'][ ]?(\w+)?\s*di (?:oggi|domani),?\s*\w+\s+(\d{1,2})\.(\d{1,2})\.(\d{4})", flat, re.I)
+    if m:
+        start_day = date(int(m.group(4)), int(m.group(3)), int(m.group(2)))
+        start_hour = DAY_PART_HOUR.get((m.group(1) or "").lower(), 0)
+    hours = re.search(r"successive (\d+)(?:\s*-\s*(\d+))? ore", flat, re.I)
+    duration = int(hours.group(2) or hours.group(1)) if hours else 24
+    start = datetime(start_day.year, start_day.month, start_day.day, start_hour, tzinfo=ROME)
+    entries = []
+    for m in re.finditer(r"ALLERTA PER (VENTO|NEVE|GHIACCIO|MAREGGIATE|TEMPERATURE\w*)\s+ALLERTA\s+"
+                         r"(GIALLA|ARANCIONE|ROSSA)\s+(.{0,160})", flat, re.I):
+        key = m.group(1).upper()
+        phenomenon = LAZIO_PHENOMENA["TEMPERATURE"] if key.startswith("TEMP") else LAZIO_PHENOMENA[key]
+        scope = m.group(3)
+        if re.search(r"tutt[ei] le zone", scope, re.I):
+            zones = [""]
+        else:
+            zones = [name for code, name in LAZIO_ZONES.items()
+                     if re.search(r"\b" + re.escape(name) + r"\b", scope, re.I)
+                     or re.search(r"\bzon[ae][^.]*\b" + code + r"\b", scope)]
+            if not zones:
+                raise ValueError(f"zone non interpretate: {scope[:80]!r}")
+        for zone in zones:
+            entries.append({"phenomenon": phenomenon, "level": norm_level(m.group(2)), "zone": zone,
+                            "valid_from": start.isoformat(),
+                            "valid_to": (start + timedelta(hours=duration)).isoformat()})
+    return entries
+
+
+@adapter("Lazio")
+def lazio():
+    page = get("https://www.regione.lazio.it/protezione-civile/bollettini-allertamenti")
+    anchor = re.search(r'<a[^>]*id="pcbannerallertaLabel"[^>]*href="([^"]+\.pdf)"[^>]*>.*?Allerta\s+(\w+)\s*</a>'
+                       r'\s*<span[^>]*>\s*emessa il (\d{2})/(\d{2})/(\d{4})', page, re.S)
+    if not anchor or not norm_level(anchor.group(2)):
+        return []  # nessun allertamento in corso
+    issued = date(int(anchor.group(5)), int(anchor.group(4)), int(anchor.group(3)))
+    entries = parse_lazio_pdf(pdf_text(anchor.group(1)), issued)
+    if not entries:
+        raise ValueError("banner di allerta presente ma nessun rischio riconosciuto nel PDF")
+    return grouped(entries, title=f"Regione Lazio - allertamento del {issued.strftime('%d/%m/%Y')}",
+                   url=anchor.group(1))
