@@ -761,8 +761,9 @@ def lazio():
     if not anchor or not norm_level(anchor.group(2)):
         return []  # nessun allertamento in corso
     issued = date(int(anchor.group(5)), int(anchor.group(4)), int(anchor.group(3)))
-    entries = parse_lazio_pdf(pdf_text(anchor.group(1)), issued)
+    pdf_url = urllib.parse.urljoin("https://www.regione.lazio.it/", anchor.group(1).replace("&amp;", "&"))
+    entries = parse_lazio_pdf(pdf_text(urllib.parse.quote(pdf_url, safe=":/%?=&")), issued)
     if not entries:
         raise ValueError("banner di allerta presente ma nessun rischio riconosciuto nel PDF")
     return grouped(entries, title=f"Regione Lazio - allertamento del {issued.strftime('%d/%m/%Y')}",
-                   url=anchor.group(1))
+                   url=pdf_url)
