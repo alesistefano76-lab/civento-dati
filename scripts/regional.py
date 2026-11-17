@@ -536,14 +536,17 @@ def parse_allertameteo(body, day, zone_of_area):
 
 def allertameteo(base, zone_of_area, region_label):
     titles = {}
-    try:
-        feed = get(f"{base}/compila-allerta-portlet/feed?feed=allerte-bollettini")
+    for path in ("/compila-allerta-portlet/feed", "/o/compila-allerta-portlet/feed"):
+        try:
+            feed = get(f"{base}{path}?feed=allerte-bollettini")
+        except Exception:  # noqa: BLE001  il titolo e' facoltativo
+            continue
         for t in re.findall(r"<entry>\s*<title>([^<]+)</title>", feed):
             m = re.search(r"del (\d{2})[-/](\d{2})[-/](\d{4})", t)
             if m:
                 titles.setdefault(date(int(m.group(3)), int(m.group(2)), int(m.group(1))), t.strip())
-    except Exception:  # noqa: BLE001  il titolo e' facoltativo
-        pass
+        if titles:
+            break
     today = datetime.now(ROME).date()
     alerts = []
     for suffix, offset in (("", 0), ("-domani", 1)):
@@ -634,3 +637,72 @@ def parse_toscana(html):
 @adapter("Toscana")
 def toscana():
     return parse_toscana(get("https://www.cfr.toscana.it/legenda_aree/ajax.php?type=note"))
+
+
+# ── Puglia ───────────────────────────────────────────────────────────────────
+# Centro Funzionale Decentrato: elenco "Messaggi di allerta" (frammento HTML Liferay) + PDF.
+# Tabella: PUGLIA-X | rischio | data | livello | ora inizio | durata (ore). Si prendono i rischi
+# non coperti dal bollettino nazionale (vento, neve, ghiaccio, mareggiate). Per ogni giorno vale
+# il messaggio piu recente che lo riguarda.
+
+PUGLIA_ZONES = dict(zip("ABCDEFGHI", [
+    "Gargano e Tremiti", "Tavoliere - bassi bacini del Candelaro, Cervaro e Carapelle",
+    "Puglia Centrale Adriatica", "Salento", "Bacini del Lato e del Lenne", "Puglia Centrale Bradanica",
+    "Basso Ofanto", "Sub-Appennino Dauno", "Basso Fortore",
+]))
+PUGLIA_LIST = ("https://protezionecivile.regione.puglia.it/messaggi-di-allerta?p_p_id=RicercaDocumenti_INSTANCE_"
+               "MLXETJ0nG9kN&p_p_lifecycle=2&p_p_state=normal&p_p_mode=view&p_p_resource_id=%2Fricerca%2F"
+               "documenti%2Fdocumenti-list&_RicercaDocumenti_INSTANCE_MLXETJ0nG9kN_cur=1"
+               "&_RicercaDocumenti_INSTANCE_MLXETJ0nG9kN_delta=4")
+PUGLIA_RISKS = {"vento": "vento", "neve": "neve", "ghiaccio": "ghiaccio", "mareggiat": "mareggiate"}
+_PUGLIA_ROW = re.compile(
+    r"PUGLIA-([A-I])\s*\|?\s*([A-Za-zÀ-ú' /-]+?)\s*\|?\s*(\d{2})-(\d{2})-(\d{4})\s*\|?\s*"
+    r"(VERDE|GIALLO|ARANCIONE|ROSSO)\b[^|\d]*\|?\s*(\d{1,2}):(\d{2})\s*\|?\s*(\d{1,3})\s*h", re.I)
+
+
+def parse_puglia(text):
+    """-> (date coperte dal messaggio, voci)."""
+    covered = set()
+    for m in re.finditer(r"(?:Evento Previsto per (?:oggi|domani)|SITUAZIONE PREVISTA PER (?:OGGI|DOMANI))"
+                         r"\s+(\d{2})/(\d{2})/(\d{4})", text, re.I):
+        covered.add(date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
+    entries = []
+    for m in _PUGLIA_ROW.finditer(text):
+        risk = m.group(2).strip().lower()
+        phenomenon = next((v for k, v in PUGLIA_RISKS.items() if k in risk), None)
+        level = norm_level(m.group(6))
+        day = date(int(m.group(5)), int(m.group(4)), int(m.group(3)))
+        covered.add(day)
+        if not phenomenon or not level:
+            continue
+        start = datetime(day.year, day.month, day.day, int(m.group(7)), int(m.group(8)), tzinfo=ROME)
+        end = start + timedelta(hours=int(m.group(9)))
+        entries.append({"phenomenon": phenomenon, "level": level, "zone": PUGLIA_ZONES[m.group(1).upper()],
+                        "valid_from": start.isoformat(), "valid_to": end.isoformat(), "_day": day})
+    if not _PUGLIA_ROW.search(text) and re.search(r"PUGLIA-[A-I]\s*\|?\s*(Vento|Idro|Temporal|Neve|Ghiacc)", text, re.I):
+        raise ValueError("tabella del messaggio presente ma non interpretata")
+    return covered, entries
+
+
+@adapter("Puglia")
+def puglia():
+    listing = get(PUGLIA_LIST)
+    links = re.findall(r'href="(https://protezionecivile\.regione\.puglia\.it/documents/[^"]+\.pdf[^"]*)"\s*'
+                       r'[^>]*>\s*([^<]+?)\s*</a>', listing)
+    if not links:
+        raise ValueError("nessun messaggio di allerta nell'elenco")
+    done, entries, titles = set(), [], {}
+    for url, label in links[:3]:  # dal piu recente
+        covered, found = parse_puglia(pdf_text(url.replace("&amp;", "&")))
+        new_days = covered - done
+        for e in found:
+            if e["_day"] in new_days:
+                titles[e["_day"]] = (label, url)
+                entries.append(e)
+        done |= covered
+    alerts = []
+    for day in sorted({e["_day"] for e in entries}):
+        label, url = titles[day]
+        day_entries = [{k: v for k, v in e.items() if k != "_day"} for e in entries if e["_day"] == day]
+        alerts += grouped(day_entries, title=f"Regione Puglia - {label}", url=url.replace("&amp;", "&"))
+    return alerts
