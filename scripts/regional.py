@@ -17,6 +17,7 @@ import json
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
@@ -27,9 +28,48 @@ ADAPTERS = {}
 UA = "Mozilla/5.0 (compatible; civento-dati; +https://github.com/alesistefano76-lab/civento-dati)"
 
 
+_SSL_CONTEXTS = {}
+
+
+def _context_with_intermediate(host):
+    """Alcuni siti non inviano il certificato intermedio. Come fanno i browser, lo si scarica
+    dall'indirizzo "CA Issuers" del certificato del sito e si verifica la catena completa
+    rispetto alle autorita' di sistema (la verifica resta attiva)."""
+    import os
+    import ssl
+    import tempfile
+    leaf_pem = ssl.get_server_certificate((host, 443))
+    with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as f:
+        f.write(leaf_pem)
+    try:
+        info = ssl._ssl._test_decode_cert(f.name)  # noqa: SLF001
+    finally:
+        os.unlink(f.name)
+    issuers = [u for u in info.get("caIssuers", ()) if u.startswith("http")]
+    if not issuers:
+        raise ValueError(f"{host}: certificato intermedio mancante e nessun indirizzo CA Issuers")
+    der = urllib.request.urlopen(urllib.request.Request(issuers[0], headers={"User-Agent": UA}), timeout=30).read()
+    pem = der.decode("ascii") if der.startswith(b"-----BEGIN") else ssl.DER_cert_to_PEM_cert(der)
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(cadata=pem)
+    return ctx
+
+
+def _open(req, timeout):
+    import ssl
+    host = urllib.parse.urlsplit(req.full_url).hostname
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXTS.get(host))
+    except urllib.error.URLError as e:
+        if not isinstance(e.reason, ssl.SSLCertVerificationError) or host in _SSL_CONTEXTS:
+            raise
+        _SSL_CONTEXTS[host] = _context_with_intermediate(host)
+        return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXTS[host])
+
+
 def get(url, headers=None, data=None):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": UA, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=45) as r:
+    with _open(req, 45) as r:
         raw = r.read()
         charset = r.headers.get_content_charset() or "utf-8"
     return raw.decode(charset, errors="replace")
@@ -373,7 +413,7 @@ def bolzano():
 
 def get_bytes(url, headers=None):
     req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with _open(req, 60) as r:
         return r.read()
 
 
