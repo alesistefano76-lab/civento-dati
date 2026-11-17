@@ -578,3 +578,59 @@ EMILIA_ZONES = {
 def emilia_romagna():
     return allertameteo("https://allertameteo.regione.emilia-romagna.it", EMILIA_ZONES.get,
                         "Allerta Meteo Emilia-Romagna")
+
+
+# ── Toscana ──────────────────────────────────────────────────────────────────
+# Centro Funzionale Regionale (cfr.toscana.it): tabella del bollettino corrente con zone (codici),
+# rischio, finestra oraria e criticita. Si prendono vento, mareggiate, neve e ghiaccio.
+
+TOSCANA_ZONES = {
+    "A1": "Arno-Casentino", "A2": "Arno-Valdarno Sup.", "A3": "Arno-Firenze", "A4": "Valdarno Inf.",
+    "A5": "Valdelsa-Valdera", "A6": "Arno-Costa", "B": "Bisenzio e Ombrone Pt", "C": "Valdichiana",
+    "E1": "Etruria", "E2": "Etruria-Costa Nord", "E3": "Etruria-Costa Sud", "F1": "Fiora e Albegna",
+    "F2": "Fiora e Albegna-Costa e Giglio", "I": "Isole", "L": "Lunigiana", "M": "Mugello-Val di Sieve",
+    "O1": "Ombrone Gr-Alto", "O2": "Ombrone Gr-Medio", "O3": "Ombrone Gr-Costa", "R1": "Reno",
+    "R2": "Romagna-Toscana", "S1": "Serchio-Garfagnana-Lima", "S2": "Serchio-Lucca", "S3": "Serchio-Costa",
+    "T": "Valtiberina", "V": "Versilia",
+}
+TOSCANA_RISKS = {"VENTO": "vento", "MAREGGIATE": "mareggiate", "NEVE": "neve", "GHIACCIO": "ghiaccio"}
+
+
+def _toscana_time(text):
+    m = re.search(r"ore\s+(\d{1,2})[.:](\d{2})\s+di\s+(.+)", text, re.S)
+    if not m:
+        return None
+    day = parse_italian_date(m.group(3))
+    if not day:
+        return None
+    t = datetime(day.year, day.month, day.day, int(m.group(1)), int(m.group(2)), tzinfo=ROME)
+    return t + timedelta(minutes=1) if (t.hour, t.minute) == (23, 59) else t
+
+
+def parse_toscana(html):
+    entries = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+        cells = [re.sub(r"<[^>]+>", " ", c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        if len(cells) < 4:
+            continue
+        zones_txt, risk_txt, times_txt, level_txt = (re.sub(r"\s+", " ", c).strip() for c in cells[:4])
+        phenomenon = next((v for k, v in TOSCANA_RISKS.items() if k in risk_txt.upper()), None)
+        level = norm_level(level_txt)
+        if not phenomenon or not level:
+            continue
+        start_txt, _, end_txt = times_txt.partition(" alle ")
+        start, end = _toscana_time(start_txt), _toscana_time("alle " + end_txt if end_txt else "")
+        if not start:
+            raise ValueError(f"orario non interpretato: {times_txt!r}")
+        end = end or start.replace(hour=0, minute=0) + timedelta(days=1)
+        for code in (z.strip() for z in zones_txt.split(",")):
+            if code in TOSCANA_ZONES:
+                entries.append({"phenomenon": phenomenon, "level": level, "zone": TOSCANA_ZONES[code],
+                                "valid_from": start.isoformat(), "valid_to": end.isoformat()})
+    return grouped(entries, title="Centro Funzionale Regione Toscana - bollettino di criticita",
+                   url="https://www.cfr.toscana.it/index.php?IDS=2&IDSS=76")
+
+
+@adapter("Toscana")
+def toscana():
+    return parse_toscana(get("https://www.cfr.toscana.it/legenda_aree/ajax.php?type=note"))
