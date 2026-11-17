@@ -10,6 +10,8 @@ import os
 import re
 import sys
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from datetime import datetime, timedelta, timezone
 
 REPO = "pcm-dpc/DPC-Bollettini-Criticita-Idrogeologica-Idraulica"
@@ -104,19 +106,52 @@ def build(bulletin_id):
     }
 
 
-def main():
-    bulletin_id = latest_bulletin_id()
+def load_previous():
     try:
         with open(OUT, encoding="utf-8") as f:
-            if json.load(f).get("bulletin_id") == bulletin_id:
-                print(f"Bollettino {bulletin_id} gia presente, nessuna modifica")
-                return
+            return json.load(f)
     except (FileNotFoundError, ValueError):
-        pass
-    data = build(bulletin_id)
+        return None
+
+
+def comparable(data):
+    return {k: v for k, v in (data or {}).items() if k != "generated"}
+
+
+def main():
+    previous = load_previous()
+    national_keys = ("source", "source_url", "license", "bulletin_id", "title", "days", "zone_comuni")
+    try:
+        bulletin_id = latest_bulletin_id()
+        if previous and previous.get("bulletin_id") == bulletin_id:
+            national = {k: previous[k] for k in national_keys if k in previous}
+        else:
+            national = {k: v for k, v in build(bulletin_id).items() if k in national_keys}
+    except Exception as e:  # noqa: BLE001
+        if not previous:
+            raise
+        print(f"Bollettino nazionale non aggiornato ({e}), mantengo il precedente", file=sys.stderr)
+        national = {k: previous[k] for k in national_keys if k in previous}
+
+    import regional  # noqa: E402  (same folder)
+    alerts, status = regional.collect()
+    if previous:
+        # A region that failed this time keeps its last known alerts instead of vanishing.
+        for region, st in status.items():
+            if st != "ok":
+                alerts += [a for a in previous.get("regional", []) if a.get("region") == region]
+
+    data = dict(national)
+    data["generated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data["regional"] = sorted(alerts, key=lambda a: (a["region"], a["phenomenon"], a.get("valid_from") or ""))
+    data["regional_status"] = status
+
+    if previous and comparable(previous) == comparable(data):
+        print("Nessuna modifica")
+        return
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    print(f"Scritto {OUT}: {data['title']}, giorni {[d['date'] for d in data['days']]}")
+    print(f"Scritto {OUT}: {data['title']}, avvisi regionali {len(data['regional'])}, stato {status}")
 
 
 if __name__ == "__main__":
