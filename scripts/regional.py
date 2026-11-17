@@ -16,6 +16,7 @@ Un errore in una regione non blocca le altre: viene riportato in regional_status
 import json
 import re
 import sys
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
@@ -318,3 +319,199 @@ def parse_liguria(html):
 @adapter("Liguria")
 def liguria():
     return parse_liguria(get("https://allertaliguria.regione.liguria.it/"))
+
+
+# ── Trentino-Alto Adige: Provincia autonoma di Bolzano ───────────────────────
+# Agenzia per la Protezione civile (allerte.provincia.bz.it): un JSON al giorno con il livello
+# per comune e per fenomeno. Zona unica "Provincia Autonoma di Bolzano" = livello massimo tra i comuni.
+# Trento: l'allerta provinciale colorata riguarda solo idrogeologico/temporali (nel bollettino nazionale).
+
+BOLZANO_PHENOMENA = {"RISK_VENTO": "vento", "RISK_NEVE_FONDOVALLE": "neve", "RISK_TEMPERATURA": "temperature"}
+
+
+def parse_bolzano(body, day):
+    data = json.loads(body)
+    entries = []
+    for ph in data.get("phenomena", []):
+        phenomenon = BOLZANO_PHENOMENA.get(ph.get("identifier"))
+        if not phenomenon:
+            continue
+        for wl in ph.get("warningLevels", []):
+            level = norm_level(wl.get("identifier"))
+            if level and wl.get("municipalities"):
+                start, end = window(day)
+                entries.append({"phenomenon": phenomenon, "level": level,
+                                "zone": "Provincia Autonoma di Bolzano", "valid_from": start, "valid_to": end})
+    # Per fenomeno e giorno conta solo il livello piu alto.
+    best = {}
+    order = ["GIALLA", "ARANCIONE", "ROSSA"]
+    for e in entries:
+        k = (e["phenomenon"], e["valid_from"])
+        if k not in best or order.index(e["level"]) > order.index(best[k]["level"]):
+            best[k] = e
+    return list(best.values())
+
+
+@adapter("Trentino-Alto Adige")
+def bolzano():
+    today = datetime.now(ROME).date()
+    entries = []
+    for offset in (0, 1):
+        day = today + timedelta(days=offset)
+        try:
+            body = get(f"https://cms-lwz.afbs.it/fileadmin/export/risk_potential_{day.isoformat()}.json")
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and offset > 0:
+                continue  # bollettino di domani non ancora pubblicato
+            raise
+        entries += parse_bolzano(body, day)
+    return grouped(entries, title="Provincia di Bolzano - Agenzia per la Protezione civile",
+                   url="https://allerte.provincia.bz.it/it/")
+
+
+# ── Utilità PDF ──────────────────────────────────────────────────────────────
+
+def get_bytes(url, headers=None):
+    req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read()
+
+
+def pdf_text(url):
+    """Testo del PDF con pdftotext -layout (poppler-utils, installato nel workflow)."""
+    import subprocess
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as f:
+        f.write(get_bytes(url))
+        f.flush()
+        out = subprocess.run(["pdftotext", "-layout", f.name, "-"], capture_output=True, check=True, timeout=60)
+    return out.stdout.decode("utf-8", errors="replace")
+
+
+# ── Veneto ───────────────────────────────────────────────────────────────────
+# Centro Funzionale Decentrato: bollettino/avviso multirischio in PDF (elenco nella pagina CFD).
+# Tabella zona (A1..H6) x 8 rischi con colori in parole. Si prendono neve, ghiaccio al suolo,
+# vento e ondate di calore. Le 25 zone sono nello stesso ordine delle zone DPC dell'app.
+
+VENETO_CODES = ["A1", "A2", "B1", "B2", "B3", "C1", "C2", "D1", "D2", "D3", "E1", "E2", "E3", "E4", "E5",
+                "F1", "F2", "G1", "G2", "H1", "H2", "H3", "H4", "H5", "H6"]
+VENETO_NAMES = [
+    "Dolomiti orientali: Cadore, Comelico",
+    "Dolomiti Occidentali: Agordino, Zoldano, alta Val Boite",
+    "Feltrino - Bacino Cismon",
+    "Prealpi vicentine Altopiano dei Sette Comuni - Bacini Brenta Bacchiglione Agno",
+    "Pedemontana e alta pianura centrale - Bacini Brenta Bacchiglione Agno-Guà Alpone",
+    "Prealpi orientali, Baldo e Lessinia settentrionale - Bacino Adige",
+    "Lessinia meridionale e alta pianura veronese - Bacino Adige",
+    "Polesine occidentale, Bassa Veronese e Valli Grandi Veronesi - Bacini Fissero Tartaro Canalbianco, Po, Adige",
+    "Pianura polesana centrale - Bacini Fissero Tartaro Canalbianco,Po, Adige",
+    "Costa meridionale e Delta Po - Bacini Fissero Tartaro Canalbianco, Po, Adige",
+    "Pianura centrale - Bacini Brenta Bacchiglione, Muson, Scolante in Laguna",
+    "Colli Euganei e Colli Berici - Bacini Bacchiglione Fratta-Gorzone",
+    "Pianura centro meridionale e Bassa padovana - Bacini Fratta-Gorzone, Adige, Scolante in Laguna",
+    "Costa centro meridionale - Bacini Brenta Bacchiglione, Fratta-Gorzone, Adige, Scolante in Laguna",
+    "Pianura centro meridionale - Bacini Bacchiglione Fratta-Gorzone, Adige, Scolante in Laguna, "
+    "Fissero Tartaro Canalbianco",
+    "Pianura centro-orientale - Bacini del Piave, Sile, Scolante in Laguna, Pianura tra Livenza e Piave",
+    "Costa centro-orientale - Bacini del Piave, Sile, Scolante in Laguna, Pianura tra Livenza e Piave",
+    "Pianura orientale - Bacini Livenza, Lemene, Pianura tra Livenza e Piave",
+    "Costa orientale Bacini Livenza, Lemene, Tagliamento, Pianura tra Livenza e Piave",
+    "Prealpi bellunesi Valbelluna/Feltrino - Bacino Piave",
+    "Alpago Cansiglio - Bacino Piave",
+    "Prealpi trevigiane - Bacino Piave",
+    "Alta pianura trevigiana occidentale - Bacini Piave, Sile, Scolante in Laguna",
+    "Prealpi trevigiane - Bacino Livenza",
+    "Alta pianura trevigiana orientale - Bacino Livenza",
+]
+VENETO_ZONES = dict(zip(VENETO_CODES, VENETO_NAMES))
+VENETO_COLUMNS = {4: "neve", 5: "ghiaccio", 6: "vento", 7: "ondate di calore"}
+_TOK = r"(VERDE|GIALLA|ARANCIONE|ROSSA|-)"
+
+
+def parse_veneto(text):
+    entries, sections = [], 0
+    parts = re.split(r"ALLERTA PREVISTA PER (?:OGGI|DOMANI)\s*-\s*([^\n]*\d{4})", text)
+    for i in range(1, len(parts), 2):
+        day = parse_italian_date(parts[i])
+        if not day:
+            continue
+        rows = re.findall(r"^\s*([A-H]\d)\s+" + r"\s+".join([_TOK] * 8) + r"\s*$", parts[i + 1], re.M)
+        found = {r[0] for r in rows if r[0] in VENETO_ZONES}
+        if len(found) != len(VENETO_ZONES):
+            raise ValueError(f"tabella del {day} incompleta: {len(found)} zone su 25")
+        sections += 1
+        for row in rows:
+            for col, phenomenon in VENETO_COLUMNS.items():
+                level = norm_level(row[1 + col])
+                if level:
+                    start, end = window(day)
+                    entries.append({"phenomenon": phenomenon, "level": level, "zone": VENETO_ZONES[row[0]],
+                                    "valid_from": start, "valid_to": end})
+    if sections == 0:
+        raise ValueError("nessuna tabella di allerta trovata nel PDF")
+    number = re.search(r"Documento n\.\s*(\d+\s*/\s*\d{4})", text)
+    return entries, (number.group(1).replace(" ", "") if number else "")
+
+
+@adapter("Veneto")
+def veneto():
+    listing = get("https://www.regione.veneto.it/web/protezione-civile/cfd")
+    docs = re.findall(r"/documents/90748/14376036/((BAR|AAR)_(\d{6})(?:_CFD)?\.pdf)", listing)
+    if not docs:
+        raise ValueError("nessun bollettino nell'elenco")
+    name = max(docs, key=lambda d: (d[2], d[1] == "AAR"))[0]
+    url = f"https://www.regione.veneto.it/documents/90748/14376036/{name}"
+    entries, number = parse_veneto(pdf_text(url))
+    return grouped(entries, title=f"Regione Veneto - Centro Funzionale Decentrato, documento n. {number}", url=url)
+
+
+# ── Piattaforma "allertameteo" (Marche, Emilia-Romagna) ───────────────────────
+# /o/api/allerta/get-stato-allerta(-domani): [{"area": "...", "eventi": "vento:orange,neve:green,..."}]
+# Si prendono i fenomeni non coperti dal bollettino nazionale.
+
+ALLERTAMETEO_PHENOMENA = {
+    "vento": "vento", "neve": "neve", "mareggiate": "mareggiate", "ghiaccio": "ghiaccio",
+    "pioggia-che-gela": "pioggia che gela", "temperature-estreme": "temperature elevate",
+    "temperature-estreme-basse": "temperature basse",
+}
+
+
+def parse_allertameteo(body, day, zone_of_area):
+    entries = []
+    for item in json.loads(body) or []:
+        zone = zone_of_area(str(item.get("area", "")))
+        if not zone:
+            continue
+        for pair in (item.get("eventi") or "").split(","):
+            name, _, colour = pair.strip().partition(":")
+            phenomenon = ALLERTAMETEO_PHENOMENA.get(name.strip())
+            level = CSS_COLOR.get(colour.strip().lower())
+            if phenomenon and level:
+                start, end = window(day)
+                entries.append({"phenomenon": phenomenon, "level": level, "zone": zone,
+                                "valid_from": start, "valid_to": end})
+    return entries
+
+
+def allertameteo(base, zone_of_area, region_label):
+    today = datetime.now(ROME).date()
+    entries = []
+    for suffix, offset in (("", 0), ("-domani", 1)):
+        body = get(f"{base}/o/api/allerta/get-stato-allerta{suffix}", headers={"Accept": "application/json"})
+        entries += parse_allertameteo(body, today + timedelta(days=offset), zone_of_area)
+    title = region_label
+    try:
+        feed = get(f"{base}/compila-allerta-portlet/feed?feed=allerte-bollettini")
+        first = re.search(r"<entry>\s*<title>([^<]+)</title>", feed)
+        if first:
+            title = f"{region_label} - {first.group(1).strip()}"
+    except Exception:  # noqa: BLE001  il titolo e' facoltativo
+        pass
+    return grouped(entries, title=title, url=f"{base}/allerte-e-bollettini")
+
+
+@adapter("Marche")
+def marche():
+    return allertameteo("https://allertameteo.regione.marche.it",
+                        lambda a: f"Marc-{a}" if a in {"1", "2", "3", "4", "5", "6"} else None,
+                        "Regione Marche")
