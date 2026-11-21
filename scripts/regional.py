@@ -243,7 +243,8 @@ def lombardia():
 
 # ── Valle d'Aosta ────────────────────────────────────────────────────────────
 # Centro Funzionale VdA, pagina HTML del bollettino: per giorno e zona (A-D) una cella colorata
-# per fenomeno. Si prendono neve, vento e temperatura (pioggia/idro sono nel bollettino nazionale).
+# per fenomeno. Si prendono neve, vento, temperatura e valanghe (pioggia/idro sono nel bollettino
+# nazionale; le valanghe no).
 
 VDA_ZONES = {
     "A": "Valle d'Aosta centrale, Valle del Gran San Bernardo da Aosta a Valpelline,"
@@ -258,7 +259,7 @@ MONTHS_IT = {m: i for i, m in enumerate(
      "settembre", "ottobre", "novembre", "dicembre"], start=1)}
 CSS_COLOR = {"yellow": "GIALLA", "giallo": "GIALLA", "orange": "ARANCIONE", "arancione": "ARANCIONE",
              "red": "ROSSA", "rosso": "ROSSA"}
-VDA_PHENOMENA = {"neve": "neve", "vento": "vento", "temperatura": "temperature"}
+VDA_PHENOMENA = {"neve": "neve", "vento": "vento", "temperatura": "temperature", "valanghe": "valanghe"}
 
 
 def parse_italian_date(text):
